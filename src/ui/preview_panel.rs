@@ -101,7 +101,12 @@ fn render_file_preview(ui: &mut Ui, path: &Path, state: &mut PreviewPanelState) 
             match std::fs::read_to_string(path) {
                 Ok(content) => {
                     let preview = if content.len() > 4096 {
-                        format!("{}...\n\n[arquivo truncado]", &content[..4096])
+                        // Find a safe char boundary near 4096
+                        let mut end = 4096;
+                        while end > 0 && !content.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}...\n\n[arquivo truncado]", &content[..end])
                     } else {
                         content
                     };

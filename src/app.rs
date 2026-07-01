@@ -7,95 +7,153 @@ use crate::ui::header::HeaderState;
 use crate::ui::main_panel::{self, MainPanelState};
 use crate::ui::preview_panel::PreviewPanelState;
 use crate::ui::tree_panel::TreePanelState;
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Representa um workspace (pasta raiz) salvo.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Workspace {
-    pub name: String,
-    pub path: PathBuf,
+/// Histórico de navegação para voltar/avançar.
+#[derive(Debug, Clone, Default)]
+pub struct NavigationHistory {
+    pub back_stack: Vec<PathBuf>,
+    pub forward_stack: Vec<PathBuf>,
 }
 
-/// Configuração de workspaces.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceConfig {
-    pub workspaces: Vec<Workspace>,
-    pub active_index: usize,
-}
+impl NavigationHistory {
+    pub fn push(&mut self, previous_path: PathBuf) {
+        self.back_stack.push(previous_path);
+        self.forward_stack.clear();
+    }
 
-impl Default for WorkspaceConfig {
-    fn default() -> Self {
-        let home = directories::UserDirs::new()
-            .map(|d| d.home_dir().to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("C:\\"));
-        Self {
-            workspaces: vec![Workspace {
-                name: "Home".to_string(),
-                path: home,
-            }],
-            active_index: 0,
+    pub fn go_back(&mut self, current_path: &PathBuf) -> Option<PathBuf> {
+        if let Some(prev) = self.back_stack.pop() {
+            self.forward_stack.push(current_path.clone());
+            Some(prev)
+        } else {
+            None
         }
     }
+
+    pub fn go_forward(&mut self, current_path: &PathBuf) -> Option<PathBuf> {
+        if let Some(next) = self.forward_stack.pop() {
+            self.back_stack.push(current_path.clone());
+            Some(next)
+        } else {
+            None
+        }
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        !self.back_stack.is_empty()
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        !self.forward_stack.is_empty()
+    }
 }
 
-impl WorkspaceConfig {
-    /// Retorna o workspace ativo.
-    pub fn active(&self) -> &Workspace {
-        &self.workspaces[self.active_index.min(self.workspaces.len().saturating_sub(1))]
+/// Uma ação que pode ser desfeita.
+#[derive(Debug, Clone)]
+pub enum UndoAction {
+    Trash { original_path: PathBuf },
+    Rename { old_path: PathBuf, new_path: PathBuf },
+    Create { path: PathBuf },
+    Copy { destination: PathBuf },
+    Move { source: PathBuf, destination: PathBuf },
+}
+
+/// Pilha de undo.
+#[derive(Debug, Clone, Default)]
+pub struct UndoStack {
+    pub actions: Vec<UndoAction>,
+    pub max_size: usize,
+}
+
+impl UndoStack {
+    pub fn new(max_size: usize) -> Self {
+        Self { actions: Vec::new(), max_size }
     }
 
-    /// Adiciona um novo workspace.
-    pub fn add(&mut self, name: String, path: PathBuf) {
-        self.workspaces.push(Workspace { name, path });
+    pub fn push(&mut self, action: UndoAction) {
+        self.actions.push(action);
+        if self.actions.len() > self.max_size {
+            self.actions.remove(0);
+        }
     }
 
-    /// Remove um workspace pelo índice.
-    pub fn remove(&mut self, index: usize) {
-        if self.workspaces.len() > 1 && index < self.workspaces.len() {
-            self.workspaces.remove(index);
-            if self.active_index >= self.workspaces.len() {
-                self.active_index = self.workspaces.len() - 1;
+    pub fn undo(&mut self) -> Option<String> {
+        let action = self.actions.pop()?;
+        match action {
+            UndoAction::Rename { old_path, new_path } => {
+                if new_path.exists() {
+                    let _ = std::fs::rename(&new_path, &old_path);
+                    Some(format!("Desfeito: renomear → {}", old_path.display()))
+                } else {
+                    Some("Erro: arquivo não encontrado".to_string())
+                }
+            }
+            UndoAction::Create { path } => {
+                if path.exists() {
+                    let _ = trash::delete(&path);
+                    Some(format!("Desfeito: criação de {}", path.display()))
+                } else {
+                    Some("Erro: arquivo já não existe".to_string())
+                }
+            }
+            UndoAction::Copy { destination } => {
+                if destination.exists() {
+                    let _ = trash::delete(&destination);
+                    Some("Desfeito: cópia removida".to_string())
+                } else {
+                    Some("Erro: cópia não encontrada".to_string())
+                }
+            }
+            UndoAction::Move { source, destination } => {
+                if destination.exists() {
+                    let _ = std::fs::rename(&destination, &source);
+                    Some("Desfeito: movido de volta".to_string())
+                } else {
+                    Some("Erro: arquivo não encontrado".to_string())
+                }
+            }
+            UndoAction::Trash { original_path } => {
+                Some(format!("Verifique a lixeira: {}", original_path.display()))
             }
         }
     }
 
-    /// Troca o workspace ativo.
-    pub fn set_active(&mut self, index: usize) {
-        if index < self.workspaces.len() {
-            self.active_index = index;
-        }
+    pub fn can_undo(&self) -> bool {
+        !self.actions.is_empty()
+    }
+
+    pub fn last_action_label(&self) -> Option<String> {
+        self.actions.last().map(|a| match a {
+            UndoAction::Trash { original_path } => format!("Excluir {}", original_path.file_name().unwrap_or_default().to_string_lossy()),
+            UndoAction::Rename { old_path, .. } => format!("Renomear {}", old_path.file_name().unwrap_or_default().to_string_lossy()),
+            UndoAction::Create { path } => format!("Criar {}", path.file_name().unwrap_or_default().to_string_lossy()),
+            UndoAction::Copy { destination } => format!("Copiar {}", destination.file_name().unwrap_or_default().to_string_lossy()),
+            UndoAction::Move { source, .. } => format!("Mover {}", source.file_name().unwrap_or_default().to_string_lossy()),
+        })
     }
 }
 
 /// Aplicação principal F1RMA.
 pub struct F1rmaApp {
-    // Estado de navegação
     pub current_path: PathBuf,
     pub profile_filter: ProfileFilter,
-    pub workspace_config: WorkspaceConfig,
+    pub nav_history: NavigationHistory,
+    pub undo_stack: UndoStack,
 
-    // Configurações
     pub profile_config: ProfileConfig,
     pub share_config: ShareConfig,
-
-    // Anotações
     pub annotations: AnnotationStore,
-
-    // Operações de arquivo
     pub operation_history: OperationHistory,
 
-    // Estado dos painéis de UI
     pub tree_state: TreePanelState,
     pub main_state: MainPanelState,
     pub preview_state: PreviewPanelState,
     pub header_state: HeaderState,
 
-    // Rede / Discovery
     pub discovery_state: DiscoveryState,
     pub discovery_service: Option<DiscoveryService>,
 
-    // Cache
     pub needs_refresh: bool,
 }
 
@@ -103,22 +161,22 @@ impl F1rmaApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let config_dir = config_dir();
 
-        // Carrega configurações salvas
         let profile_config = load_config::<ProfileConfig>(&config_dir.join("profiles.json"))
             .unwrap_or_default();
         let share_config = load_config::<ShareConfig>(&config_dir.join("share.json"))
             .unwrap_or_default();
         let annotations =
             AnnotationStore::load(&config_dir.join("annotations.json")).unwrap_or_default();
-        let workspace_config = load_config::<WorkspaceConfig>(&config_dir.join("workspaces.json"))
-            .unwrap_or_default();
 
-        let current_path = workspace_config.active().path.clone();
+        let current_path = directories::UserDirs::new()
+            .map(|d| d.home_dir().to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("C:\\"));
 
         let mut app = Self {
             current_path,
             profile_filter: ProfileFilter::none(),
-            workspace_config,
+            nav_history: NavigationHistory::default(),
+            undo_stack: UndoStack::new(50),
             profile_config,
             share_config,
             annotations,
@@ -132,32 +190,22 @@ impl F1rmaApp {
             needs_refresh: true,
         };
 
-        // Carrega o diretório inicial
         app.refresh_directory();
-
-        // Inicia o serviço de discovery na rede
         app.start_discovery();
-
         app
     }
 
     fn start_discovery(&mut self) {
         let state = self.discovery_state.clone();
         let mut service = DiscoveryService::new(state, self.share_config.machine_id.clone());
-
         match service.start(
             &self.share_config.machine_name,
             &self.share_config.machine_id,
             &self.share_config.username,
             self.share_config.port,
         ) {
-            Ok(_) => {
-                log::info!("Discovery mDNS iniciado com sucesso");
-                self.discovery_service = Some(service);
-            }
-            Err(e) => {
-                log::error!("Falha ao iniciar discovery: {}", e);
-            }
+            Ok(_) => { self.discovery_service = Some(service); }
+            Err(e) => { log::error!("Falha ao iniciar discovery: {}", e); }
         }
     }
 
@@ -175,22 +223,39 @@ impl F1rmaApp {
         let _ = std::fs::create_dir_all(&config_dir);
         let _ = save_config(&config_dir.join("profiles.json"), &self.profile_config);
         let _ = save_config(&config_dir.join("share.json"), &self.share_config);
-        let _ = save_config(&config_dir.join("workspaces.json"), &self.workspace_config);
         let _ = self.annotations.save(&config_dir.join("annotations.json"));
     }
 }
 
 impl eframe::App for F1rmaApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Refresh se necessário
         if self.needs_refresh {
             self.refresh_directory();
+        }
+
+        // Atalhos globais
+        if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft)) {
+            if let Some(path) = self.nav_history.go_back(&self.current_path) {
+                self.current_path = path;
+                self.needs_refresh = true;
+            }
+        }
+        if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight)) {
+            if let Some(path) = self.nav_history.go_forward(&self.current_path) {
+                self.current_path = path;
+                self.needs_refresh = true;
+            }
+        }
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
+            if let Some(_msg) = self.undo_stack.undo() {
+                self.needs_refresh = true;
+            }
         }
 
         let prev_path = self.current_path.clone();
         let prev_filter = self.profile_filter.clone();
 
-        // === CABEÇALHO (topo) ===
+        // === HEADER ===
         egui::TopBottomPanel::top("header_panel")
             .min_height(36.0)
             .show(ctx, |ui| {
@@ -207,14 +272,41 @@ impl eframe::App for F1rmaApp {
                     &mut self.header_state,
                     &mut new_profile_name,
                 );
-                // Processa adição de perfil
                 if let Some(name) = new_profile_name {
                     self.profile_config.registry.add_custom(name);
                 }
+
+                // Navegação
+                ui.horizontal(|ui| {
+                    let back = ui.add_enabled(self.nav_history.can_go_back(), egui::Button::new("⬅ Voltar"));
+                    if back.clicked() {
+                        if let Some(p) = self.nav_history.go_back(&self.current_path) {
+                            self.current_path = p;
+                            self.needs_refresh = true;
+                        }
+                    }
+                    let fwd = ui.add_enabled(self.nav_history.can_go_forward(), egui::Button::new("Avançar ➡"));
+                    if fwd.clicked() {
+                        if let Some(p) = self.nav_history.go_forward(&self.current_path) {
+                            self.current_path = p;
+                            self.needs_refresh = true;
+                        }
+                    }
+                    ui.separator();
+                    let undo_label = self.undo_stack.last_action_label()
+                        .map(|l| format!("↩ Desfazer: {}", l))
+                        .unwrap_or_else(|| "↩ Desfazer".to_string());
+                    let undo = ui.add_enabled(self.undo_stack.can_undo(), egui::Button::new(&undo_label));
+                    if undo.clicked() {
+                        if let Some(_) = self.undo_stack.undo() {
+                            self.needs_refresh = true;
+                        }
+                    }
+                });
                 ui.add_space(4.0);
             });
 
-        // === RODAPÉ (base) ===
+        // === FOOTER ===
         egui::TopBottomPanel::bottom("footer_panel")
             .min_height(28.0)
             .show(ctx, |ui| {
@@ -223,7 +315,7 @@ impl eframe::App for F1rmaApp {
                 ui.add_space(2.0);
             });
 
-        // === PAINEL DE REDE (abaixo à esquerda) ===
+        // === NETWORK PANEL ===
         egui::TopBottomPanel::bottom("network_panel")
             .min_height(100.0)
             .max_height(300.0)
@@ -233,7 +325,7 @@ impl eframe::App for F1rmaApp {
                 crate::ui::network_panel::render_network_panel(ui, &self.discovery_state);
             });
 
-        // === PAINEL ESQUERDO (árvore de diretórios) ===
+        // === TREE (left) ===
         egui::SidePanel::left("tree_panel")
             .default_width(220.0)
             .min_width(150.0)
@@ -243,14 +335,13 @@ impl eframe::App for F1rmaApp {
                 crate::ui::tree_panel::render_tree_panel(
                     ui,
                     &mut self.tree_state,
-                    &mut self.workspace_config,
                     &mut self.current_path,
                     &mut self.profile_config,
                     &self.profile_filter,
                 );
             });
 
-        // === PAINEL DIREITO (preview + anotações) ===
+        // === PREVIEW (right) ===
         egui::SidePanel::right("preview_panel")
             .default_width(280.0)
             .min_width(200.0)
@@ -267,7 +358,7 @@ impl eframe::App for F1rmaApp {
                 );
             });
 
-        // === PAINEL CENTRAL (arquivos) ===
+        // === CENTRAL (files) ===
         egui::CentralPanel::default().show(ctx, |ui| {
             crate::ui::main_panel::render_main_panel(
                 ui,
@@ -278,22 +369,22 @@ impl eframe::App for F1rmaApp {
             );
         });
 
-        // Detecta mudanças de diretório ou perfil para atualizar
-        if self.current_path != prev_path || self.profile_filter.active != prev_filter.active {
+        // Detecta mudanças
+        if self.current_path != prev_path {
+            self.nav_history.push(prev_path);
+            self.refresh_directory();
+        } else if self.profile_filter.active != prev_filter.active {
             self.refresh_directory();
         }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Para o discovery mDNS
         if let Some(ref mut service) = self.discovery_service {
             service.stop();
         }
         self.save_configs();
     }
 }
-
-// === Utilitários ===
 
 fn config_dir() -> PathBuf {
     directories::ProjectDirs::from("com", "f1rma", "F1RMA")

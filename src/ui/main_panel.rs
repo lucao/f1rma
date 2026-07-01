@@ -81,7 +81,7 @@ pub struct FileEntry {
     pub size: u64,
     pub modified: Option<std::time::SystemTime>,
     pub needs_profile: bool,
-    pub profile: Option<Profile>,
+    pub profiles: Vec<Profile>,
 }
 
 /// Estado do painel principal.
@@ -156,7 +156,7 @@ pub fn load_directory(
 
             Some(FileEntry {
                 needs_profile: profile_config.needs_profile_assignment(&path),
-                profile: profile_config.resolve_profile(&path).cloned(),
+                profiles: profile_config.resolve_profiles(&path).into_iter().cloned().collect(),
                 path,
                 name,
                 is_dir: metadata.is_dir(),
@@ -367,17 +367,15 @@ fn render_details_view(
                     }
 
                     // Perfil
-                    match &entry.profile {
-                        Some(profile) => {
-                            ui.label(profile.label());
-                        }
-                        None => {
-                            ui.label(
-                                egui::RichText::new("⚠ Sem perfil")
-                                    .color(egui::Color32::from_rgb(255, 180, 50))
-                                    .small(),
-                            );
-                        }
+                    if entry.profiles.is_empty() {
+                        ui.label(
+                            egui::RichText::new("⚠ Sem perfil")
+                                .color(egui::Color32::from_rgb(255, 180, 50))
+                                .small(),
+                        );
+                    } else {
+                        let labels: Vec<&str> = entry.profiles.iter().map(|p| p.label()).collect();
+                        ui.label(labels.join(", "));
                     }
 
                     ui.end_row();
@@ -471,8 +469,9 @@ fn render_icons_view(
                         render_context_menu(ui, &entry_clone, state, profile_config, &cp);
                     });
 
-                    let name = if entry.name.len() > 12 {
-                        format!("{}...", &entry.name[..10])
+                    let name = if entry.name.chars().count() > 12 {
+                        let truncated: String = entry.name.chars().take(10).collect();
+                        format!("{}...", truncated)
                     } else {
                         entry.name.clone()
                     };
@@ -647,16 +646,23 @@ fn render_context_menu(
     // Perfil
     ui.menu_button("👤 Definir perfil", |ui| {
         for profile in profile_config.all_profiles() {
-            let is_current = entry.profile.as_ref() == Some(&profile);
+            let is_current = entry.profiles.contains(&profile);
             let label = if is_current { format!("✓ {}", profile.label()) } else { profile.label().to_string() };
             if ui.selectable_label(is_current, label).clicked() {
-                profile_config.assign_profile(entry.path.clone(), profile.clone());
-                state.status_message = Some((format!("Perfil '{}' atribuído", profile.label()), std::time::Instant::now()));
+                if is_current {
+                    // Toggle off: remove este perfil
+                    profile_config.unassign_profile(&entry.path, &profile);
+                    state.status_message = Some((format!("Perfil '{}' removido", profile.label()), std::time::Instant::now()));
+                } else {
+                    // Toggle on: adiciona este perfil
+                    profile_config.assign_profile(entry.path.clone(), profile.clone());
+                    state.status_message = Some((format!("Perfil '{}' atribuído", profile.label()), std::time::Instant::now()));
+                }
                 ui.close_menu();
             }
         }
         ui.separator();
-        if entry.profile.is_some() && ui.button("❌ Remover perfil").clicked() {
+        if !entry.profiles.is_empty() && ui.button("❌ Remover todos os perfis").clicked() {
             profile_config.remove_profile(&entry.path);
             ui.close_menu();
         }
@@ -996,17 +1002,19 @@ fn render_background_context_menu(
     ui.separator();
 
     ui.menu_button("👤 Perfil desta pasta", |ui| {
-        let current = profile_config.resolve_profile(current_path).cloned();
+        let current_profiles: Vec<Profile> = profile_config.resolve_profiles(current_path).into_iter().cloned().collect();
         let all = profile_config.all_profiles();
         for profile in all {
-            let is_current = current.as_ref() == Some(&profile);
+            let is_current = current_profiles.contains(&profile);
             let label = if is_current { format!("✓ {}", profile.label()) } else { profile.label().to_string() };
             if ui.selectable_label(is_current, label).clicked() {
-                profile_config.assign_profile(current_path.to_path_buf(), profile.clone());
-                state.status_message = Some((
-                    format!("Perfil '{}' atribuído à pasta", profile.label()),
-                    std::time::Instant::now(),
-                ));
+                if is_current {
+                    profile_config.unassign_profile(current_path, &profile);
+                    state.status_message = Some((format!("Perfil '{}' removido", profile.label()), std::time::Instant::now()));
+                } else {
+                    profile_config.assign_profile(current_path.to_path_buf(), profile.clone());
+                    state.status_message = Some((format!("Perfil '{}' atribuído", profile.label()), std::time::Instant::now()));
+                }
                 ui.close_menu();
             }
         }

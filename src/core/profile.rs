@@ -123,7 +123,8 @@ impl ProfileFilter {
 /// Armazena o mapeamento de perfis para diretórios e arquivos.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileConfig {
-    pub assignments: HashMap<PathBuf, Profile>,
+    /// Mapeamento de caminhos para lista de perfis atribuídos.
+    pub assignments: HashMap<PathBuf, Vec<Profile>>,
     pub secure_directories: Vec<PathBuf>,
     #[serde(default)]
     pub registry: ProfileRegistry,
@@ -140,25 +141,40 @@ impl Default for ProfileConfig {
 }
 
 impl ProfileConfig {
-    /// Resolve o perfil de um caminho com herança de diretórios.
-    pub fn resolve_profile(&self, path: &Path) -> Option<&Profile> {
-        if let Some(profile) = self.assignments.get(path) {
-            return Some(profile);
+    /// Resolve os perfis de um caminho com herança de diretórios.
+    pub fn resolve_profiles(&self, path: &Path) -> Vec<&Profile> {
+        if let Some(profiles) = self.assignments.get(path) {
+            return profiles.iter().collect();
         }
         let mut current = path.parent();
         while let Some(parent) = current {
-            if let Some(profile) = self.assignments.get(parent) {
-                return Some(profile);
+            if let Some(profiles) = self.assignments.get(parent) {
+                return profiles.iter().collect();
             }
             current = parent.parent();
         }
-        None
+        Vec::new()
     }
 
+    /// Adiciona um perfil a um caminho (não duplica).
     pub fn assign_profile(&mut self, path: PathBuf, profile: Profile) {
-        self.assignments.insert(path, profile);
+        let profiles = self.assignments.entry(path).or_default();
+        if !profiles.contains(&profile) {
+            profiles.push(profile);
+        }
     }
 
+    /// Remove um perfil específico de um caminho.
+    pub fn unassign_profile(&mut self, path: &Path, profile: &Profile) {
+        if let Some(profiles) = self.assignments.get_mut(path) {
+            profiles.retain(|p| p != profile);
+            if profiles.is_empty() {
+                self.assignments.remove(path);
+            }
+        }
+    }
+
+    /// Remove todos os perfis de um caminho.
     pub fn remove_profile(&mut self, path: &Path) {
         self.assignments.remove(path);
     }
@@ -168,14 +184,18 @@ impl ProfileConfig {
     }
 
     /// Visibilidade com filtro multi-perfil.
+    /// Visível se: filtro vazio (show_all), sem perfil atribuído, ou qualquer
+    /// perfil do arquivo está no filtro.
     pub fn is_visible_filtered(&self, path: &Path, filter: &ProfileFilter) -> bool {
         if filter.show_all() {
             return true;
         }
-        match self.resolve_profile(path) {
-            Some(profile) => filter.is_active(profile),
-            None => true,
+        let profiles = self.resolve_profiles(path);
+        if profiles.is_empty() {
+            return true; // Sem perfil = sempre visível
         }
+        // Visível se pelo menos um dos perfis do arquivo está ativo no filtro
+        profiles.iter().any(|p| filter.is_active(p))
     }
 
     /// Verifica se um arquivo deve estar disponível na rede.
@@ -183,19 +203,26 @@ impl ProfileConfig {
         if self.is_in_secure_directory(path) {
             return false;
         }
-        match self.resolve_profile(path) {
-            Some(profile) => self.registry.is_profile_network_shared(profile),
-            None => false,
+        let profiles = self.resolve_profiles(path);
+        if profiles.is_empty() {
+            return false;
         }
+        // Disponível se pelo menos um dos perfis compartilha na rede
+        profiles.iter().any(|p| self.registry.is_profile_network_shared(p))
     }
 
     pub fn needs_profile_assignment(&self, path: &Path) -> bool {
-        self.resolve_profile(path).is_none()
+        self.resolve_profiles(path).is_empty()
     }
 
     /// Todos os perfis disponíveis (padrão + custom).
     pub fn all_profiles(&self) -> Vec<Profile> {
         self.registry.all_profiles()
+    }
+
+    /// Verifica se um caminho tem um perfil específico atribuído.
+    pub fn has_profile(&self, path: &Path, profile: &Profile) -> bool {
+        self.resolve_profiles(path).contains(&profile)
     }
 }
 
@@ -208,7 +235,18 @@ mod tests {
         let mut config = ProfileConfig::default();
         config.assign_profile(PathBuf::from("/home/user/docs"), Profile::Pessoal);
         let file = PathBuf::from("/home/user/docs/notas/arquivo.txt");
-        assert_eq!(config.resolve_profile(&file), Some(&Profile::Pessoal));
+        assert_eq!(config.resolve_profiles(&file), vec![&Profile::Pessoal]);
+    }
+
+    #[test]
+    fn test_multiple_profiles() {
+        let mut config = ProfileConfig::default();
+        config.assign_profile(PathBuf::from("/shared"), Profile::Pessoal);
+        config.assign_profile(PathBuf::from("/shared"), Profile::Profissional);
+        let profiles = config.resolve_profiles(Path::new("/shared/file.txt"));
+        assert_eq!(profiles.len(), 2);
+        assert!(profiles.contains(&&Profile::Pessoal));
+        assert!(profiles.contains(&&Profile::Profissional));
     }
 
     #[test]
@@ -228,10 +266,23 @@ mod tests {
     }
 
     #[test]
+    fn test_multi_profile_visibility() {
+        let mut config = ProfileConfig::default();
+        config.assign_profile(PathBuf::from("/shared"), Profile::Pessoal);
+        config.assign_profile(PathBuf::from("/shared"), Profile::Dev);
+
+        let file = PathBuf::from("/shared/file.txt");
+
+        // Visible if ANY of the file's profiles is in the filter
+        let mut filter = ProfileFilter::none();
+        filter.toggle(Profile::Dev);
+        assert!(config.is_visible_filtered(&file, &filter));
+    }
+
+    #[test]
     fn test_custom_profile() {
         let mut config = ProfileConfig::default();
         config.registry.add_custom("Faculdade".to_string());
-
         let profiles = config.all_profiles();
         assert_eq!(profiles.len(), 4);
         assert!(profiles.contains(&Profile::Custom("Faculdade".to_string())));
