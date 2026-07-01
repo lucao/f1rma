@@ -156,7 +156,7 @@ pub fn load_directory(
 
             Some(FileEntry {
                 needs_profile: profile_config.needs_profile_assignment(&path),
-                profile: profile_config.resolve_profile(&path),
+                profile: profile_config.resolve_profile(&path).cloned(),
                 path,
                 name,
                 is_dir: metadata.is_dir(),
@@ -367,7 +367,7 @@ fn render_details_view(
                     }
 
                     // Perfil
-                    match entry.profile {
+                    match &entry.profile {
                         Some(profile) => {
                             ui.label(profile.label());
                         }
@@ -646,11 +646,11 @@ fn render_context_menu(
 
     // Perfil
     ui.menu_button("👤 Definir perfil", |ui| {
-        for profile in Profile::all() {
-            let is_current = entry.profile == Some(*profile);
+        for profile in profile_config.all_profiles() {
+            let is_current = entry.profile.as_ref() == Some(&profile);
             let label = if is_current { format!("✓ {}", profile.label()) } else { profile.label().to_string() };
             if ui.selectable_label(is_current, label).clicked() {
-                profile_config.assign_profile(entry.path.clone(), *profile);
+                profile_config.assign_profile(entry.path.clone(), profile.clone());
                 state.status_message = Some((format!("Perfil '{}' atribuído", profile.label()), std::time::Instant::now()));
                 ui.close_menu();
             }
@@ -996,12 +996,13 @@ fn render_background_context_menu(
     ui.separator();
 
     ui.menu_button("👤 Perfil desta pasta", |ui| {
-        let current = profile_config.resolve_profile(current_path);
-        for profile in Profile::all() {
-            let is_current = current == Some(*profile);
+        let current = profile_config.resolve_profile(current_path).cloned();
+        let all = profile_config.all_profiles();
+        for profile in all {
+            let is_current = current.as_ref() == Some(&profile);
             let label = if is_current { format!("✓ {}", profile.label()) } else { profile.label().to_string() };
             if ui.selectable_label(is_current, label).clicked() {
-                profile_config.assign_profile(current_path.to_path_buf(), *profile);
+                profile_config.assign_profile(current_path.to_path_buf(), profile.clone());
                 state.status_message = Some((
                     format!("Perfil '{}' atribuído à pasta", profile.label()),
                     std::time::Instant::now(),
