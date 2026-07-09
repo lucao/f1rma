@@ -1,7 +1,7 @@
 use crate::core::profile::{Profile, ProfileFilter};
 use crate::network::discovery::DiscoveryState;
 use egui::Ui;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Estado do diálogo de adicionar perfil.
 pub struct HeaderState {
@@ -22,7 +22,7 @@ impl Default for HeaderState {
 pub fn render_header(
     ui: &mut Ui,
     profile_filter: &mut ProfileFilter,
-    current_path: &Path,
+    current_path: &mut PathBuf,
     machine_name: &str,
     discovery_state: &DiscoveryState,
     available_profiles: &[Profile],
@@ -57,9 +57,9 @@ pub fn render_header(
 
         ui.separator();
 
-        // Pasta atual
+        // Breadcrumb clicável da pasta atual
         ui.label("📁");
-        ui.label(egui::RichText::new(current_path.to_string_lossy().as_ref()).monospace().size(13.0));
+        render_breadcrumb(ui, current_path);
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(egui::RichText::new(format!("🖥 {}", machine_name)).size(12.0).weak());
@@ -126,5 +126,44 @@ pub fn render_header(
                     }
                 });
             });
+    }
+}
+
+/// Renderiza o caminho como breadcrumb clicável (cada segmento navega para aquela pasta).
+fn render_breadcrumb(ui: &mut Ui, current_path: &mut PathBuf) {
+    let path_clone = current_path.clone();
+    let mut segments: Vec<(String, PathBuf)> = Vec::new();
+
+    // Coleta todos os segmentos do path
+    let mut p = path_clone.as_path();
+    loop {
+        let name = p.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| p.to_string_lossy().to_string());
+        segments.push((name, p.to_path_buf()));
+        if let Some(parent) = p.parent() {
+            if parent == p { break; } // Raiz
+            p = parent;
+        } else {
+            break;
+        }
+    }
+
+    segments.reverse();
+
+    for (i, (name, path)) in segments.iter().enumerate() {
+        if i > 0 {
+            ui.label(egui::RichText::new("›").weak().size(13.0));
+        }
+        let is_last = i == segments.len() - 1;
+        let text = if is_last {
+            egui::RichText::new(name.as_str()).monospace().size(13.0).strong()
+        } else {
+            egui::RichText::new(name.as_str()).monospace().size(13.0)
+        };
+
+        if ui.add(egui::Label::new(text).sense(egui::Sense::click())).clicked() {
+            *current_path = path.clone();
+        }
     }
 }

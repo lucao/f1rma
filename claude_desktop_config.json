@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "f1rma": {
+      "command": "f1rma-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}

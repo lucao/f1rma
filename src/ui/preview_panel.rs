@@ -153,7 +153,8 @@ fn render_annotations(
 
     // Exibir anotações existentes
     let path_buf = path.to_path_buf();
-    if let Some(file_annotations) = annotations.get_annotations(path).cloned() {
+    let file_annotations = annotations.get_annotations(path).clone();
+    if !file_annotations.is_empty() {
         egui::ScrollArea::vertical()
             .max_height(150.0)
             .id_salt("annotations_scroll")
@@ -166,13 +167,15 @@ fn render_annotations(
                                     .strong()
                                     .small(),
                             );
+                            let mid = if annotation.machine_id.len() >= 8 {
+                                &annotation.machine_id[..8]
+                            } else {
+                                &annotation.machine_id
+                            };
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "({})",
-                                    &annotation.machine_id[..8]
-                                ))
-                                .weak()
-                                .small(),
+                                egui::RichText::new(format!("({})", mid))
+                                    .weak()
+                                    .small(),
                             );
                         });
                         ui.label(&annotation.content);

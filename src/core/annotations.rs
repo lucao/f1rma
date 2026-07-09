@@ -1,8 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+/// Extensão do arquivo sidecar de anotações.
+const SIDECAR_EXT: &str = ".f1rma";
 
 /// Uma anotação feita por um usuário sobre um arquivo.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,11 +36,18 @@ impl Annotation {
     }
 }
 
-/// Armazena todas as anotações do sistema, indexadas por caminho de arquivo.
+/// Dados do sidecar (o que é persistido no arquivo .f1rma).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct SidecarData {
+    pub annotations: Vec<Annotation>,
+}
+
+/// Gerenciador de anotações com persistência em arquivos sidecar.
+/// Cada arquivo/pasta `X` tem suas anotações em `X.f1rma` ao lado dele.
+#[derive(Debug, Clone, Default)]
 pub struct AnnotationStore {
-    /// Mapa de caminho do arquivo -> lista de anotações.
-    pub annotations: HashMap<PathBuf, Vec<Annotation>>,
+    /// Cache em memória para evitar leitura de disco a cada frame.
+    cache: std::collections::HashMap<PathBuf, Vec<Annotation>>,
 }
 
 impl AnnotationStore {
@@ -46,57 +55,101 @@ impl AnnotationStore {
         Self::default()
     }
 
-    /// Adiciona uma anotação para um arquivo.
+    /// Retorna o caminho do arquivo sidecar para um dado path.
+    fn sidecar_path(path: &Path) -> PathBuf {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(SIDECAR_EXT);
+        PathBuf::from(sidecar)
+    }
+
+    /// Carrega anotações de um arquivo (do cache ou disco).
+    pub fn get_annotations(&mut self, path: &Path) -> &Vec<Annotation> {
+        if !self.cache.contains_key(path) {
+            let annotations = self.load_from_disk(path);
+            self.cache.insert(path.to_path_buf(), annotations);
+        }
+        self.cache.get(path).unwrap()
+    }
+
+    /// Adiciona uma anotação e persiste imediatamente.
     pub fn add_annotation(&mut self, path: PathBuf, annotation: Annotation) {
-        self.annotations.entry(path).or_default().push(annotation);
+        if !self.cache.contains_key(&path) {
+            let loaded = self.load_from_disk(&path);
+            self.cache.insert(path.clone(), loaded);
+        }
+        self.cache.get_mut(&path).unwrap().push(annotation);
+        self.save_to_disk(&path);
     }
 
-    /// Retorna as anotações de um arquivo.
-    pub fn get_annotations(&self, path: &Path) -> Option<&Vec<Annotation>> {
-        self.annotations.get(path)
-    }
-
-    /// Remove uma anotação por ID.
+    /// Remove uma anotação por ID e persiste.
     pub fn remove_annotation(&mut self, path: &Path, annotation_id: Uuid) -> bool {
-        if let Some(annotations) = self.annotations.get_mut(path) {
+        if let Some(annotations) = self.cache.get_mut(path) {
             let len_before = annotations.len();
             annotations.retain(|a| a.id != annotation_id);
-            return annotations.len() < len_before;
-        }
-        false
-    }
-
-    /// Atualiza o conteúdo de uma anotação.
-    pub fn update_annotation(
-        &mut self,
-        path: &Path,
-        annotation_id: Uuid,
-        new_content: String,
-    ) -> bool {
-        if let Some(annotations) = self.annotations.get_mut(path) {
-            if let Some(annotation) = annotations.iter_mut().find(|a| a.id == annotation_id) {
-                annotation.update(new_content);
+            if annotations.len() < len_before {
+                self.save_to_disk(path);
                 return true;
             }
         }
         false
     }
 
-    /// Persiste as anotações em disco.
-    pub fn save(&self, config_path: &Path) -> std::io::Result<()> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        std::fs::write(config_path, json)
+    /// Atualiza uma anotação e persiste.
+    pub fn update_annotation(&mut self, path: &Path, annotation_id: Uuid, new_content: String) -> bool {
+        if let Some(annotations) = self.cache.get_mut(path) {
+            if let Some(ann) = annotations.iter_mut().find(|a| a.id == annotation_id) {
+                ann.update(new_content);
+                self.save_to_disk(path);
+                return true;
+            }
+        }
+        false
     }
 
-    /// Carrega as anotações do disco.
-    pub fn load(config_path: &Path) -> std::io::Result<Self> {
-        if !config_path.exists() {
-            return Ok(Self::default());
+    /// Carrega do disco (arquivo sidecar).
+    fn load_from_disk(&self, path: &Path) -> Vec<Annotation> {
+        let sidecar = Self::sidecar_path(path);
+        if !sidecar.exists() {
+            return Vec::new();
         }
-        let content = std::fs::read_to_string(config_path)?;
-        let store: Self = serde_json::from_str(&content)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        Ok(store)
+        match std::fs::read_to_string(&sidecar) {
+            Ok(content) => {
+                serde_json::from_str::<SidecarData>(&content)
+                    .map(|d| d.annotations)
+                    .unwrap_or_default()
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Salva no disco (arquivo sidecar).
+    fn save_to_disk(&self, path: &Path) {
+        let sidecar = Self::sidecar_path(path);
+        if let Some(annotations) = self.cache.get(path) {
+            if annotations.is_empty() {
+                // Remove o sidecar se não há anotações
+                let _ = std::fs::remove_file(&sidecar);
+                return;
+            }
+            let data = SidecarData { annotations: annotations.clone() };
+            if let Ok(json) = serde_json::to_string_pretty(&data) {
+                let _ = std::fs::write(&sidecar, json);
+            }
+        }
+    }
+
+    /// Invalida o cache para um path (forçar releitura do disco).
+    pub fn invalidate(&mut self, path: &Path) {
+        self.cache.remove(path);
+    }
+
+    /// Método de compatibilidade (não faz nada — persistência agora é por arquivo).
+    pub fn save(&self, _config_path: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Método de compatibilidade (retorna store vazio — dados carregam sob demanda).
+    pub fn load(_config_path: &Path) -> std::io::Result<Self> {
+        Ok(Self::default())
     }
 }

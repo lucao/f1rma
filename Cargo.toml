@@ -5,6 +5,14 @@ edition = "2021"
 description = "Gerenciador de arquivos com perfis, compartilhamento em rede e anotações"
 authors = ["Lucas Teixeira"]
 
+[[bin]]
+name = "f1rma"
+path = "src/main.rs"
+
+[[bin]]
+name = "f1rma-mcp"
+path = "src/mcp/main.rs"
+
 [dependencies]
 eframe = "0.31"
 egui = "0.31"

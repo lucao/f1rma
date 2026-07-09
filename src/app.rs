@@ -265,7 +265,7 @@ impl eframe::App for F1rmaApp {
                 crate::ui::header::render_header(
                     ui,
                     &mut self.profile_filter,
-                    &self.current_path,
+                    &mut self.current_path,
                     &self.share_config.machine_name,
                     &self.discovery_state,
                     &profiles,
